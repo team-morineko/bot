@@ -71,4 +71,4 @@ async def auth_panel(interaction: discord.Interaction, role: discord.Role):
         ephemeral=False  # チャンネル上に常時表示
     )
 
-bot.run("YOUR_BOT_TOKEN")
+bot.run("MTQyOTA5MzM4NjAzOTcyNjEwMQ.GvTGzM.L6S_i9Jab_kVG2IF_EIareFuaSoDkQzpAzEsic")
