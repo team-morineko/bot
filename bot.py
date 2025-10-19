@@ -1,102 +1,74 @@
-import discord
-from discord import app_commands
-from discord.ext import commands
+import random
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
-import random, string, io, os
+import discord
+from discord.ext import commands
 
-intents = discord.Intents.default()  # 特権インテント不要
+intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-GUILD_ID = 123456789012345678  # サーバーID
-ROLE_ID = 987654321098765432   # 認証ロールID
-active_verifications = {}  # user_id -> 認証データを保存
+# ボタンクラス
+class AuthView(discord.ui.View):
+    def __init__(self, role: discord.Role):
+        super().__init__(timeout=None)
+        self.auth_role = role
 
+    @discord.ui.button(label="認証開始", style=discord.ButtonStyle.green)
+    async def auth_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        member = interaction.user
+        guild_member = interaction.guild.get_member(member.id)
 
-# 数字画像を生成する関数
-def generate_code_image(code: str):
-    img = Image.new("RGB", (200, 80), color=(30, 30, 30))
-    draw = ImageDraw.Draw(img)
-    try:
-        font = ImageFont.truetype("arial.ttf", 50)
-    except:
-        font = ImageFont.load_default()
-    draw.text((50, 15), code, fill=(0, 255, 0), font=font)
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    buf.seek(0)
-    return buf
-
-
-# ボタンUIを作成
-class NumberButtonView(discord.ui.View):
-    def __init__(self, user_id, code):
-        super().__init__(timeout=120)
-        self.user_id = user_id
-        self.code = code
-        self.entered = ""
-
-        # 0〜9ボタンを動的に追加
-        for i in range(10):
-            self.add_item(NumberButton(str(i), self))
-
-    async def check_code(self, interaction: discord.Interaction):
-        if self.entered == self.code:
-            guild = bot.get_guild(GUILD_ID)
-            member = guild.get_member(self.user_id)
-            if member:
-                role = guild.get_role(ROLE_ID)
-                await member.add_roles(role)
-                await interaction.response.edit_message(content="認証に成功しました。", attachments=[], view=None)
-                active_verifications.pop(self.user_id, None)
-            else:
-                await interaction.response.send_message("サーバーに参加していないようです。", ephemeral=True)
-
-
-class NumberButton(discord.ui.Button):
-    def __init__(self, label, view):
-        super().__init__(label=label, style=discord.ButtonStyle.secondary)
-        self.parent_view = view
-
-    async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.parent_view.user_id:
-            await interaction.response.send_message("あなたの認証ではありません。", ephemeral=True)
+        # 既にそのロールを持っている場合は拒否
+        if guild_member and self.auth_role in guild_member.roles:
+            await interaction.response.send_message(
+                f"あなたはすでに `{self.auth_role.name}` に認証済みです。",
+                ephemeral=True
+            )
             return
 
-        self.parent_view.entered += self.label
+        # 数字生成
+        number = str(random.randint(1000, 9999))
 
-        # 進捗表示
-        display = "🔢 入力中: " + "•" * len(self.parent_view.entered)
-        await interaction.response.edit_message(content=display, view=self.parent_view)
+        # 画像作成
+        img = Image.new('RGB', (200, 100), color=(255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        font = ImageFont.load_default()
+        draw.text((50, 40), number, font=font, fill=(0, 0, 0))
 
-        # コードが完成したらチェック
-        if len(self.parent_view.entered) == len(self.parent_view.code):
-            await self.parent_view.check_code(interaction)
+        with BytesIO() as image_binary:
+            img.save(image_binary, 'PNG')
+            image_binary.seek(0)
+            file = discord.File(fp=image_binary, filename="captcha.png")
 
+        # ephemeral メッセージで送信（本人だけ）
+        await interaction.response.send_message(
+            "以下の数字を入力してください。",
+            file=file,
+            ephemeral=True
+        )
 
-@bot.event
-async def on_ready():
-    print(f"✅ Logged in as {bot.user}")
-    try:
-        await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
-        print("スラッシュコマンド同期完了")
-    except Exception as e:
-        print(e)
+        # モーダルで入力
+        class AuthModal(discord.ui.Modal, title="認証フォーム"):
+            input_number = discord.ui.TextInput(label="画像の数字を入力してください", style=discord.TextStyle.short)
 
+            async def on_submit(self2, modal_interaction: discord.Interaction):
+                if self2.input_number.value == number:
+                    await modal_interaction.response.send_message(f"認証成功！ `{self.auth_role.name}` が付与されました", ephemeral=True)
+                    if guild_member:
+                        await guild_member.add_roles(self.auth_role)
+                else:
+                    await modal_interaction.response.send_message("数字が違います。もう一度試してください。", ephemeral=True)
 
-@bot.tree.command(name="verify", description="認証を開始します（DMが届きます）")
-async def verify(interaction: discord.Interaction):
-    code = "".join(random.choices(string.digits, k=4))
-    active_verifications[interaction.user.id] = code
-    image = generate_code_image(code)
-    file = discord.File(fp=image, filename="verify.png")
+        await interaction.followup.send_modal(AuthModal())
 
-    try:
-        view = NumberButtonView(interaction.user.id, code)
-        await interaction.user.send("下の画像の数字を入力してください。", file=file, view=view)
-        await interaction.response.send_message("DMを確認してください。", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.response.send_message("DMを開放してから再試行してください。", ephemeral=True)
+# /認証パネル コマンド（ユーザーがロールを選択可能）
+@bot.tree.command(name="認証パネル", description="認証ボタンを設置します")
+@discord.app_commands.describe(role="認証後に付与したいロールを選んでください")
+async def auth_panel(interaction: discord.Interaction, role: discord.Role):
+    await interaction.response.send_message(
+        f"以下のボタンを押すと `{role.name}` に認証されます。",
+        view=AuthView(role),
+        ephemeral=False  # チャンネル上に常時表示
+    )
 
-
-bot.run(os.environ['DISCORD_TOKEN'])
+bot.run("YOUR_BOT_TOKEN")
